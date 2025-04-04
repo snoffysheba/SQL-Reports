@@ -45,10 +45,11 @@ CREATE TABLE "Maternal_Health_ETL".maternal_anthropometry (
     -- Fat distribution 
     periumbilical_subcutanous_fat FLOAT, 		--1. updated "not_applicable to null" 2. changed text to float
     periumbilical_visceral_fat FLOAT,	  		--1. updated "not_applicable to null" 2. changed text to float
-    periumbilical_total_fat FLOAT,				--1. Deleted this column
+    periumbilical_total_fat FLOAT,				--1. Populated the null values (periumbilical_subcutanous_fat + periumbilical_visceral_fat)
     preperitoneal_subcutaneous_fat FLOAT,		--no changes applied. 
     preperitoneal_visceral_fat FLOAT,			--no changes applied. 
-
+	preperitoneal_total_fat FLOAT,				--added new column (preperitoneal_subcutaneous_fat + preperitoneal_visceral_fat)
+	
     -- Circumference-based measures
     maternal_brachial_circumference FLOAT,		--no changes applied. 
     circumference_maternal_calf FLOAT,			--no changes applied. 
@@ -92,6 +93,7 @@ INSERT INTO "Maternal_Health_ETL".maternal_anthropometry (
     periumbilical_total_fat,
     preperitoneal_subcutaneous_fat,
     preperitoneal_visceral_fat,
+	preperitoneal_total_fat,
 
     -- Circumference-based measures
     maternal_brachial_circumference,
@@ -134,7 +136,8 @@ SELECT
     MH.periumbilical_total_fat,
     MH.preperitoneal_subcutaneous_fat,
     MH.preperitoneal_visceral_fat,
-
+	(coalesce(MH.preperitoneal_subcutaneous_fat, 0) + coalesce(MH.preperitoneal_visceral_fat, 0)),
+        
     -- Circumference-based measures
     MH.maternal_brachial_circumference,
     MH.circumference_maternal_calf,
@@ -433,18 +436,12 @@ where (coalesce(periumbilical_subcutanous_fat, 0) + coalesce(periumbilical_visce
 
 select * from "Maternal_Health_ETL".maternal_anthropometry;
 
-/* Upon analysis, since periumbilical_total_fat is a redundant column derived directly from periumbilical_subcutanous_fat and 
-periumbilical_visceral_fat, and involved all the above computations for data cleaning, decided to remove it to ensure simplicity
-of the data and instead decided to use an on-the-fly sum calculation whenever needed for analysis or reporting.
-*/
+/*
+Few related commands are commented out and saved to be used for future use.
 
 alter table "Maternal_Health_ETL".maternal_anthropometry
 drop column periumbilical_total_fat;
 
-
-select * from "Maternal_Health_ETL".maternal_anthropometry;
-/*
-Few related commands are commented out and saved to be used for future use.
 
 alter table "Maternal_Health_ETL".maternal_anthropometry
 alter column periumbilical_total_fat type numeric(10, 1)
@@ -458,4 +455,198 @@ set
 from "Maternal_Health_ETL".data_import_to_MH_ETL di
 where ma.case_id = di.case_id;
 */
-----------------------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+--8. preperitoneal_total_fat = preperitoneal_subcutaneous_fat + preperitoneal_visceral_fat
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+alter table "Maternal_Health_ETL".maternal_anthropometry
+alter column preperitoneal_total_fat type numeric(10, 1)
+
+select * from "Maternal_Health_ETL".maternal_anthropometry;
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+--9. Outliers
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+-- 1. prepregnant_bmi (case id = 6 , value = 55.36 )
+
+select * from "Maternal_Health_ETL".maternal_anthropometry where prepregnant_bmi = 55.36
+
+
+--Upon analysis, 
+--If BMI = 55.36 and weight = 133 kg, then:
+--Height = √(133 / 55.36) ≈ 1.55 meters (≈ 5 ft 1 inch)
+--High-BMI, healthy-outcome pregnancy (14 other high-BMI cases, BMI >= 40)
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+--2. current_maternal_weight_3rd_tri (case id = 237 , value = 999)
+
+select * from "Maternal_Health_ETL".maternal_anthropometry where current_maternal_weight_3rd_tri = 999
+
+-- Upon analysis,
+--All weight entries for the mother across trimesters show a gradual, realistic increase.
+--Sudden jump to 999 kg in 3rd trimester is clearly a mistake.
+--Replacing 999 with NULL in the current_maternal_weight_3rd_tri column for this row.
+
+update "Maternal_Health_ETL".maternal_anthropometry set current_maternal_weight_3rd_tri = null where current_maternal_weight_3rd_tri = 999
+
+select * from "Maternal_Health_ETL".maternal_anthropometry where case_id = 237
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+-- 10. Hip Circumference Not Greater Than Waist Circumference
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+select case_id, maternal_hip_circumference, maternal_waist_circumference, maternal_neck_circumference
+from "Maternal_Health_ETL".maternal_anthropometry
+where not (
+    maternal_hip_circumference > maternal_waist_circumference
+);
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+-- 11. Maternal Weight Increase Across Trimesters
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+select case_id, current_maternal_weight_1st_tri, current_maternal_weight_2nd_tri, current_maternal_weight_3rd_tri
+from "Maternal_Health_ETL".maternal_anthropometry
+where current_maternal_weight_1st_tri is not null
+  and current_maternal_weight_2nd_tri is not null
+  and current_maternal_weight_3rd_tri is not null
+  and not (
+    current_maternal_weight_1st_tri < current_maternal_weight_2nd_tri
+    and current_maternal_weight_2nd_tri < current_maternal_weight_3rd_tri
+  );
+
+select * 
+from "Maternal_Health_ETL".maternal_anthropometry 
+where case_id = 129;
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+-- 12. Mismatch in BMI Category Labels
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+select *
+from "Maternal_Health_ETL".maternal_anthropometry
+where current_bmi_according_who is not null
+  and bmi_according_who is not null
+  and current_bmi_according_who != bmi_according_who;
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+-- 13. Weight Loss >10kg From Prepregnancy to 1st Trimester
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+select case_id, prepregnant_weight, current_maternal_weight_1st_tri,
+       prepregnant_weight - current_maternal_weight_1st_tri as weight_drop
+from "Maternal_Health_ETL".maternal_anthropometry
+where prepregnant_weight is not null
+  and current_maternal_weight_1st_tri is not null
+  and (prepregnant_weight - current_maternal_weight_1st_tri) > 10;
+
+select * 
+from "Maternal_Health_ETL".maternal_anthropometry 
+where case_id in (132, 137);
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+-- 14. Prepregnancy Weight Not Less Than Prepartum Weight
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+select case_id, 
+       cast(prepregnant_weight as numeric) as prepregnant_weight,
+       cast(prepartum_maternal_weight as numeric) as prepartum_maternal_weight
+from "Maternal_Health_ETL".maternal_anthropometry
+where prepregnant_weight is not null
+  and prepartum_maternal_weight is not null
+  and not (cast(prepregnant_weight as numeric) < cast(prepartum_maternal_weight as numeric));
+
+select * 
+from "Maternal_Health_ETL".maternal_anthropometry 
+where case_id in (214, 194);
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+-- 15. Extreme Outliers in Skinfold Measurement Patterns
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+select case_id, 
+       mean_tricciptal_skinfold, 
+       mean_subscapular_skinfold, 
+       mean_supra_iliac_skin_fold
+from "Maternal_Health_ETL".maternal_anthropometry
+where mean_tricciptal_skinfold is not null
+  and mean_subscapular_skinfold is not null
+  and mean_supra_iliac_skin_fold is not null
+  and not (
+    mean_tricciptal_skinfold < mean_subscapular_skinfold
+    and mean_subscapular_skinfold < mean_supra_iliac_skin_fold
+  )
+  and (
+    abs(mean_tricciptal_skinfold - mean_subscapular_skinfold) > 10
+    or abs(mean_subscapular_skinfold - mean_supra_iliac_skin_fold) > 10
+  );
+
+select * 
+from "Maternal_Health_ETL".maternal_anthropometry 
+where case_id in (69, 196, 241, 242, 261);
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+-- 16. Extreme Difference in Maternal Height Measurements (>5 cm)
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+select case_id, 
+       height_at_inclusion, 
+       prepartum_maternal_height,
+       abs(height_at_inclusion - prepartum_maternal_height) as height_difference
+from "Maternal_Health_ETL".maternal_anthropometry
+where height_at_inclusion is not null
+  and prepartum_maternal_height is not null
+  and abs(height_at_inclusion - prepartum_maternal_height) > 5;
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
